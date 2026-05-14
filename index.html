@@ -1,0 +1,192 @@
+<!DOCTYPE html>
+<html>
+
+<head>
+    <title>Chattr</title>
+    <link rel="stylesheet" href="style.css">
+</head>
+
+<body>
+    <div class="container">
+        <div id="login" class="login-box">
+            <h2 class="title-main">Chattr</h2>
+            <p class="title-sub">End-to-end encrypted messaging</p>
+            <input id="username" placeholder="Choose a username" />
+            <button onclick="login()">Login / Register</button>
+        </div>
+        <div id="app" style="display:none;">
+            <h3>Select a User <button onclick="loadUsers()">Refresh</button></h3>
+            <ul id="users"></ul>
+            <div id="chat-container" style="display: none;">
+                <div id="chat"></div>
+                <div class="input-area">
+                    <input id="msg" placeholder="Type your secret message..." />
+                    <button id="sendBtn" onclick="sendMsg()">Send Encrypted</button>
+                </div>
+            </div>
+            <div id="keys"></div>
+        </div>
+    </div>
+    <script>
+        let userId, myPubKey, myPrivKey, currentChatId;
+        // Secure 2048-bit RSA using Web Crypto API
+        async function generateKeys() {
+            const keyPair = await window.crypto.subtle.generateKey(
+                {
+                    name: "RSA-OAEP",
+                    modulusLength: 2048,
+                    publicExponent: new Uint8Array([1, 0, 1]),
+                    hash: "SHA-256",
+                },
+                true,
+                ["encrypt", "decrypt"]
+            );
+
+            const jwkPub = await window.crypto.subtle.exportKey("jwk", keyPair.publicKey);
+            myPubKey = jwkPub;
+            myPrivKey = keyPair.privateKey;
+            return JSON.stringify(jwkPub);
+        }
+
+        async function encrypt(msg, pubKeyJwk) {
+            const publicKey = await window.crypto.subtle.importKey(
+                "jwk",
+                pubKeyJwk,
+                { name: "RSA-OAEP", hash: "SHA-256" },
+                true,
+                ["encrypt"]
+            );
+
+            const encoded = new TextEncoder().encode(msg);
+            const encryptedBuffer = await window.crypto.subtle.encrypt(
+                { name: "RSA-OAEP" },
+                publicKey,
+                encoded
+            );
+
+            return btoa(String.fromCharCode(...new Uint8Array(encryptedBuffer)));
+        }
+
+        async function decrypt(encMsgBase64, privKeyObj) {
+            if (!encMsgBase64) return "";
+            try {
+                const binaryString = atob(encMsgBase64);
+                const bytes = new Uint8Array(binaryString.length);
+                for (let i = 0; i < binaryString.length; i++) {
+                    bytes[i] = binaryString.charCodeAt(i);
+                }
+
+                const decryptedBuffer = await window.crypto.subtle.decrypt(
+                    { name: "RSA-OAEP" },
+                    privKeyObj,
+                    bytes.buffer
+                );
+                return new TextDecoder().decode(decryptedBuffer);
+            } catch (e) {
+                return "[Decryption failed]";
+            }
+        }
+        async function login() {
+            const pubKey = await generateKeys();
+            const form = new FormData();
+            form.append('username', document.getElementById('username').value);
+            form.append('public_key', pubKey);
+            const res = await fetch('register.php', { method: 'POST', body: form });
+            const data = await res.json();
+            if (data.success) {
+                userId = data.user_id; myPubKey = JSON.parse(pubKey); document.getElementById('app').style.display = 'block'; document.getElementById('login').style.display = 'none'; loadUsers();
+                document.getElementById('keys').innerHTML = `<p>My Pub: JWK RSA 2048-bit</p><p>Priv (local): Stored securely in memory</p>`;
+            }
+        }
+        async function loadUsers() {
+            const res = await fetch('get_users.php');
+            const users = await res.json();
+            const ul = document.getElementById('users');
+            ul.innerHTML = users.map(u => `<li onclick="setChat(${u.id})">${u.username}</li>`).join('');
+        }
+        let lastMessageCount = 0;
+        function setChat(id) {
+            currentChatId = id;
+            lastMessageCount = 0;
+            document.getElementById('chat').innerHTML = '';
+            document.getElementById('chat-container').style.display = 'block';
+            loadChat();
+        }
+        async function loadChat() {
+            if (!currentChatId) return;
+            const res = await fetch(`get_messages.php?sender_id=${userId}&receiver_id=${currentChatId}`);
+            const msgs = await res.json();
+
+            if (msgs.length !== lastMessageCount) {
+                const chat = document.getElementById('chat');
+
+                const decryptedMsgs = await Promise.all(msgs.map(async m => {
+                    const cipherToDecrypt = (m.sender_id == userId && m.encrypted_msg_self) ? m.encrypted_msg_self : m.encrypted_msg;
+                    const decryptedText = await decrypt(cipherToDecrypt, myPrivKey);
+                    return { ...m, decryptedText };
+                }));
+
+                chat.innerHTML = decryptedMsgs.map(m => {
+                    if (m.sender_id == userId) return `<p class="msg-you"><b>You:</b> ${m.decryptedText}</p>`;
+                    const isThem = m.sender_id == currentChatId;
+                    return `<p class="${isThem ? 'msg-them' : 'msg-you'}"><b>${isThem ? 'Them' : 'You'}:</b> ${m.decryptedText} <span style="font-size:10px; opacity:0.6;"><br>Secure 2048-bit RSA</span></p>`;
+                }).join('');
+
+                chat.scrollTo({
+                    top: chat.scrollHeight,
+                    behavior: 'smooth'
+                });
+                lastMessageCount = msgs.length;
+            }
+        }
+        async function sendMsg() {
+            const msg = document.getElementById('msg').value;
+            if (!msg) {
+                alert('Please type a message first!');
+                return;
+            }
+            if (!currentChatId) {
+                alert('Please select a user to chat with from the list above!');
+                return;
+            }
+
+            const btn = document.getElementById('sendBtn');
+            const originalText = btn.innerText;
+            btn.innerText = 'Sending...';
+            btn.disabled = true;
+
+            const res = await fetch('get_users.php');
+            const users = await res.json();
+            const recipient = users.find(u => u.id == currentChatId);
+            const encMsg = await encrypt(msg, JSON.parse(recipient.public_key));
+            const encMsgSelf = await encrypt(msg, myPubKey);
+            
+            const form = new FormData();
+            form.append('sender_id', userId); form.append('receiver_id', currentChatId);
+            form.append('encrypted_msg', encMsg); 
+            form.append('encrypted_msg_self', encMsgSelf);
+            form.append('sender_pub_key', JSON.stringify(myPubKey));
+            await fetch('send_message.php', { method: 'POST', body: form });
+
+            document.getElementById('msg').value = '';
+            loadChat();
+
+            btn.innerText = 'Sent!';
+            setTimeout(() => {
+                btn.innerText = originalText;
+                btn.disabled = false;
+            }, 1500);
+        }
+        setInterval(loadChat, 2000); // Poll
+
+        async function pingServer() {
+            if (userId) {
+                await fetch(`ping.php?user_id=${userId}`);
+                loadUsers(); // Refresh the list with only online users
+            }
+        }
+        setInterval(pingServer, 5000);
+    </script>
+</body>
+
+</html>
