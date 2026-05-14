@@ -86,5 +86,3 @@ Navigate to `http://localhost/rsa_chat/index.html` in your browser. Open a secon
    * The recipient's browser downloads the Base64 ciphertext.
    * It uses the private key securely stored in memory to decrypt the ciphertext back into readable text.
 
-## 📝 License
-This project is open-source and available under the MIT License.
